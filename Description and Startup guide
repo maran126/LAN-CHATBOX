@@ -1,0 +1,421 @@
+README.md — LAN Chat for ESP32
+
+Below is a complete, ready-to-commit `README.md`. Save it in the root of your repository as `README.md`.
+
+
+
+markdown
+# LAN Chat — ESP32 Web Chat Server
+
+A self-hosted LAN chat server running entirely on an ESP32. No internet, no cloud, no external server — just a single ESP32 on your local network serving a full-featured group chat to any browser on the same WiFi.
+
+![Platform](https://img.shields.io/badge/platform-ESP32-blue)
+![Framework](https://img.shields.io/badge/framework-Arduino-teal)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+ Features
+
+- Zero-install client — open a browser, enter a name, chat. No app to install.
+- Multiple rooms — General, Tech, Random (easy to extend).
+- Direct messages — click any sender's name to send a DM.
+- Admin mode — login with a password to unlock moderation tools:
+  - View all connected users (IP, room, admin flag)
+  - Remove / ban users by IP
+  - Delete any message
+  - View a rolling activity log
+- File & image sharing — up to 50 KB per file, inline images, download links.
+- Message editing — your own messages can be edited after sending.
+- Typing indicator — see who is typing in real time.
+- Persistence — chat history survives reboots via LittleFS.
+- Sound & notifications — in-browser beep on new messages, optional desktop notifications.
+- Comprehensive serial logging — every HTTP request, login attempt, filesystem operation, and WiFi event is logged with a `[TAG]` prefix for easy debugging.
+
+---
+
+Hardware
+
+| Item                 | Notes                                     |
+|----------------------|-------------------------------------------|
+| ESP32 dev board      | Any ESP32 (WROOM-32, WROVER, S2/S3, etc.) |
+| USB cable            | For flashing and power                    |
+| 2.4 GHz WiFi network | ESP32 does **not** support 5 GHz          |
+
+No external components required — everything runs on the ESP32.
+
+
+
+ Quick Start
+
+1. Clone the repository
+
+bash
+git clone https://github.com/maran126/LAN-CHATBOX
+cd esp32-lan-chat
+
+
+2. Configure WiFi
+
+Open the sketch and edit the configuration block at the top:
+
+cpp
+const char* ssid       = "YOUR_WIFI";
+const char* password   = "YOUR_WIFI_PASSWORD";
+const char* ADMIN_PASS = "admin123";
+
+
+> Note: `ADMIN_PASS` is the password a user types into the login screen to become admin. Change it before deploying.
+
+### 3. Add the partition table
+
+Create a file named `partitions.csv` in the project root:
+
+```csv
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xE000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x140000,
+app1,     app,  ota_1,   0x150000, 0x140000,
+spiffs,   data, spiffs,  0x290000, 0x160000,
+coredump, data, coredump,0x3F0000, 0x10000,
+```
+
+This reserves a 1.4 MB LittleFS partition for chat history. The sketch mounts it as `spiffs`.
+
+4. Set the filesystem label in the sketch
+
+The label must match the partition table:
+
+```cpp
+#define FS_PARTITION_LABEL "spiffs"
+```
+
+5. Flash (PlatformIO — recommended)
+
+Add to `platformio.ini`:
+
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+board_build.partitions = partitions.csv
+board_build.filesystem = littlefs
+monitor_speed = 115200
+```
+
+Flash in this order — the erase step is required the first time because the default partition table has no `spiffs` partition:
+
+```bash
+pio run -t erase
+pio run -t upload
+pio run -t uploadfs
+pio device monitor
+```
+
+6. Flash (Arduino IDE)
+
+1. Set Tools → Board to your ESP32 model.
+2. Select a partition scheme that includes SPIFFS/LittleFS (e.g. *"Default 4MB with spiffs"*).
+3. Upload the sketch.
+4. Open Tools → ESP32 Sketch Data Upload to upload the filesystem image (requires the `arduino-esp32fs-plugin`).
+
+7. Connect
+
+Open the serial monitor at 115200 baud. You should see:
+
+```
+[    1509] [BOOT] === starting ===
+[    1510] [FS] Mounting 'spiffs' @ 0x290000 size 0x160000
+[    1511] [FS] OK  total=1441792 used=0
+[    1561] [WIFI] connecting to 'YOUR_WIFI'
+..........
+[    8165] [WIFI] connected  IP=192.168.1.42  RSSI=-55 dBm  channel=6
+[    8167] [BOOT] Chat Server: http://192.168.1.42
+```
+
+Open `http://192.168.1.42` in any browser on the same network.
+
+---
+
+Usage
+
+As a client
+
+1. Open the web page.
+2. Enter a username.
+3. Leave the password field empty.
+4. Click Join.
+
+You can now chat in the selected room, switch rooms, send files, and DM other users by clicking their name.
+
+As an admin
+
+1. Enter a username.
+2. Enter the admin password (`admin123` by default).
+3. Click Join.
+
+The admin panel appears with the user list and activity log. Only one admin can be active at a time — the slot is released when the ESP32 reboots.
+
+ Moderation actions
+
+| Action                | How                                               | 
+|-----------------------|---------------------------------------------------|
+| Delete a message      | Hover the message → click `x` (admin only)        |
+| Edit your own message | Hover the message → click `Edit`                  |
+| Remove a user         | Admin panel → click **Remove** next to their name |
+| Ban a user            | Removing a user also bans their IP until reboot   |
+
+---
+
+ Architecture
+
+```
+Browser (any device on LAN)
+        │  HTTP  (GET requests, JSON responses)
+        ▼
+┌──────────────────────────────────────┐
+│  ESP32                               │
+│  ┌────────────────────────────────┐  │
+│  │ WebServer (port 80)            │  │
+│  │  /             → HTML UI       │  │
+│  │  /login        → auth          │  │
+│  │  /send         → post message  │  │
+│  │  /sendfile     → post file     │  │
+│  │  /edit         → edit message  │  │
+│  │  /typing       → typing signal │  │
+│  │  /msgs         → message feed  │  │
+│  │  /count        → online count  │  │
+│  │  /users        → admin: users  │  │
+│  │  /activity     → admin: log    │  │
+│  │  /remove       → admin: ban    │  │
+│  │  /delmsg       → admin: del    │  │
+│  └──────────────┬─────────────────┘  │
+│                 │                    │
+│  ┌──────────────▼─────────────────┐  │
+│  │ In-RAM ring buffers            │  │
+│  │  users[MAX_USERS]              │  │
+│  │  messages[MAX_MESSAGES]        │  │
+│  │  activities[MAX_ACTIVITIES]    │  │
+│  │  banned[MAX_BANNED]            │  │
+│  └──────────────┬─────────────────┘  │
+│                 │                    │
+│  ┌──────────────▼─────────────────┐  │
+│  │ LittleFS (spiffs partition)    │  │
+│  │  /chat.json                    │  │
+│  └────────────────────────────────┘  │
+└──────────────────────────────────────┘
+```
+
+Design notes:
+
+- Polling, not WebSockets — simpler, works on any ESP32 core, no handshake issues. The browser polls `/msgs` every 1 s and `/count` every 2 s.
+- Ring buffers in RAM — bounded memory, old messages dropped when full (`MAX_MESSAGES` = 50).
+- Persistence to LittleFS on every message — survives reboot.
+- Users and bans are RAM-only — cleared on reboot, so a power cycle resets the ban list and frees the admin slot.
+
+---
+
+ Configuration Reference
+
+All configuration is at the top of the sketch:
+
+| Constant             | Default                        | Purpose                          |
+|----------------------|--------------------------------|----------------------------------|
+| `ssid`               | `"YOUR_WIFI"`                  | WiFi network name (2.4 GHz only) |
+| `password`           | `"YOUR_WIFI_PASSWORD"`         | WiFi password                    |
+| `ADMIN_PASS`         | `"admin123"`                   | Password for admin login         |
+| `FS_PARTITION_LABEL` | `"spiffs"`                     | Must match partition table       |
+| `MSG_FILE`           | `"/chat.json"`                 | Persistence path                 |
+| `MAX_FILE_SIZE`      | `50000`                        | Max upload bytes (50 KB)         |
+| `MAX_USERS`          | `10`                           | Max concurrent connections       |
+| `MAX_MESSAGES`       | `50`                           | Ring buffer size for messages    |
+| `MAX_ACTIVITIES`     | `20`                           | Ring buffer size for activity log|
+| `MAX_BANNED`         | `10`                           | Max banned IPs                   |
+| `ROOMS[]`            | `{"General", "Tech", "Random"}`| Room names                       |
+
+---
+
+ Serial Log Tags
+
+Every action is logged with a short tag so you can `grep` the monitor:
+
+| Tag          | Meaning                                               |
+|--------------|-------------------------------------------------------|
+| `[BOOT]`     | Startup phase                                         |
+| `[FS]`       | Filesystem mount, read, write                         |
+| `[WIFI]`     | Connect, reconnect, heartbeat (every 15 s)            |
+| `[HTTP]`     | Every incoming request (method, path, client IP)      |
+| `[LOGIN]`    | Login attempt details                                 |
+| `[SEND]`     | Message send                                          |
+| `[MSG]`      | Message stored                                        |
+| `[FILE]`     | File upload                                           |
+| `[EDIT]`     | Message edit                                          |
+| `[DEL]`      | Message delete                                        |
+| `[TYPING]`   | Typing indicator                                      |
+| `[MSGS]`     | Messages feed polled                                  |
+| `[USERS]`    | Admin user list requested                             |
+| `[ACTIVITY]` | Admin activity log requested                          |
+| `[REMOVE]`   | User removed                                          |
+| `[BAN]`      | IP added to ban list                                  |
+| `[ACT]`      | Activity log entry written                            |
+| `[404]`      | Unknown route                                         |
+
+Example:
+
+```
+[   35174] [HTTP] GET / from 10.211.251.130
+[   35175] [HTTP] served index (12473 bytes)
+[   36815] [HTTP] GET /login from 10.211.251.130
+[   36816] [LOGIN] name='Alice' passLen=0 room='General' ip=10.211.251.130 users=0
+[   36818] [LOGIN] OK  name='Alice' admin=0 users=1
+[   36819] [ACT] Alice joined General
+```
+
+---
+
+ Troubleshooting
+
+ `[FS] Partition 'spiffs' NOT found in partition table!`
+
+The partition table flashed to the board does not contain a data partition named `spiffs`. Fix:
+
+1. Confirm `partitions.csv` exists and contains the `spiffs` line shown above.
+2. Confirm `platformio.ini` has `board_build.partitions = partitions.csv`.
+3. `pio run -t erase` then `pio run -t upload` then `pio run -t uploadfs`.
+4. If you must use a different label, change `FS_PARTITION_LABEL` in the sketch to match, and make sure the partition **subtype** is `spiffs` (not `fat`).
+
+The boot log prints every available data partition if the label isn't found, so you can copy the correct label from there.
+
+ Clicking Join does nothing
+
+Open the browser DevTools console (F12). If you see:
+
+```
+Uncaught SyntaxError: ...
+```
+
+The page's JavaScript failed to parse and `doLogin` is undefined. This is not a server problem — the browser never sent the request. Verify the HTML served from `/` is not corrupted: check `[HTTP] served index (N bytes)` in serial; a normal page is ~12 KB. If the size looks wrong, reflash.
+
+ `Network error: TypeError: Failed to fetch`
+
+Browser cannot reach the ESP32. Check:
+
+- PC and ESP32 are on the same network (ping the ESP IP).
+- VPN is disabled.
+- Firewall allows HTTP to the ESP IP.
+- You are opening `http://` (not `https://`).
+
+ `Admin slot taken`
+
+Someone is already logged in as admin. Either use a different name with the password field empty to join as a client, or power-cycle the ESP32 to free the slot.
+
+ `You have been removed`
+
+Your IP is on the ban list. Power-cycle the ESP32 — the ban list is RAM-only and clears on reboot.
+
+ `Could not open COM11` / `PermissionError(13)`
+
+The serial port is busy or the driver is broken:
+
+1. Close all serial monitors (PlatformIO monitor, Arduino Serial Monitor, PuTTY).
+2. Unplug and replug the USB cable.
+3. Reinstall the CH340 or CP210x driver.
+4. Try a different USB cable or port.
+5. As a last resort, hold BOOT, press EN/RESET, release BOOT, then upload.
+
+ Compilation error: `'function' does not name a type`
+
+The JavaScript block has escaped out of its string literal. The sketch is designed so that the entire JavaScript lives inside `static const char PAGE_JS[] PROGMEM = "..."` — every JS line starts and ends with a quote. If you see a bare `function doLogin(){` in the source (no leading `"`), it was accidentally pasted outside the string. Delete it and re-copy from the sketch file in this repo.
+
+ Chat history disappears after reboot
+
+Check the serial boot log. If you see `[FS] ... failed` or `[FS] Partition ... NOT found`, the filesystem isn't mounted — history is kept in RAM only. Reflash the partition table and filesystem image as described in [Quick Start](#quick-start).
+
+---
+
+ Security Notes
+
+This project is intended for **trusted LAN use only**. Be aware:
+
+- No encryption. All traffic is plain HTTP. Anyone on the network can sniff messages.
+- No authentication tokens. Login is a name + optional admin password; the server trusts the client-supplied `name` parameter for identity. Do not expose this to untrusted networks.
+- Bans are IP-based and RAM-only. They reset on reboot and do not survive DHCP changes.
+- 50 KB file limit. This is a hard limit to protect the ESP32's RAM and LittleFS partition. Files are stored base64-encoded in `chat.json`, so effective file size in memory is ~1.4× the uploaded bytes.
+- No rate limiting. A hostile LAN client could flood the server. Do not expose the ESP32 to the internet.
+
+For production / public deployments, add TLS termination, real authentication, and rate limiting — or don't use an ESP32.
+
+---
+
+ Extending
+
+A few natural extensions, in increasing order of difficulty:
+
+1. Add rooms — append entries to `ROOMS[]` and bump `ROOM_COUNT`.
+2. Increase history — raise `MAX_MESSAGES` (uses ~50 bytes/message RAM) and consider reading from LittleFS instead of RAM for large histories.
+3. Persist users/bans — write `banned[]` and `users[]` to `/users.json` on change, load on boot.
+4. WebSocket transport — replace polling with `WebSocketsServer` (library `links2004/arduinoWebSockets`) for lower latency and less HTTP overhead.
+5. OTA updates — add `ArduinoOTA` so you can reflash over WiFi instead of USB.
+6. Multi-admin — remove the `adminExists()` gate so more than one admin can be connected.
+
+
+
+ Project Layout
+
+esp32-lan-chat/
+├── README.md
+├── platformio.ini         PlatformIO project config
+├── partitions.csv         Custom partition table with spiffs
+└── src/
+    └── main.cpp           The full sketch (or sketch_nov7b.ino for Arduino IDE)
+```
+
+---
+
+Contributing
+
+Pull requests are welcome. For larger changes please open an issue first to discuss what you'd like to change.
+
+When reporting bugs, please include:
+
+- The serial boot log from power-on to the point where the bug occurs.
+- The serial log covering the attempted action (login, send, etc.).
+- Any browser console error (F12 → Console).
+- ESP32 model, Arduino core version, and PlatformIO/IDE version.
+
+The serial log tags make this easy — just copy the relevant lines.
+
+---
+
+ License
+
+MIT License. See `LICENSE` file for the full text.
+
+---
+
+ Acknowledgements
+
+- [ESP32 Arduino core](https://github.com/espressif/arduino-esp32) — WiFi, WebServer, LittleFS.
+- [PlatformIO](https://platformio.org/) — build tooling and filesystem image upload.
+- Inspired by the classic LAN chat scripts that used to run on ESP8266 and have slowly disappeared.
+```
+
+---
+
+Save that as `README.md` in your repo root. It covers install, usage, architecture, troubleshooting (every error you've hit during this build is in there with its fix), security caveats, and extension ideas.
+
+A couple of small things you should also include in the repo before you publish:
+
+1. A `LICENSE` file — the MIT text (README references it). Grab it from https://choosealicense.com/licenses/mit/.
+2. A `.gitignore` — at minimum:
+   ```
+   .pio/
+   .vscode/
+   *.bin
+   *.elf
+   ```
+3. Rename the sketch to `main.cpp` if you use PlatformIO (`src/main.cpp`), or keep `sketch_nov7b.ino` and note in the README that Arduino IDE users should use `.ino`.
+4. Screenshot — add a `docs/screenshot.png` and reference it at the top of the README; GitHub renders it inline and it makes the repo far more appealing.
+5. Make sure `partitions.csv` is committed — without it, nobody can reproduce your setup.
